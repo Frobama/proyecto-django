@@ -5,6 +5,7 @@ media/
 __pycache__/
 *.pyc
 *.pyo
-
+.idea/
+pyproject.toml
 .DS_Store/
 Thumbs.db

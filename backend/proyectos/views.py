@@ -1,7 +1,12 @@
+from pathlib import PurePosixPath
+
+from django.db import transaction
+from django.http import FileResponse, Http404
 from rest_framework import generics, viewsets
 from rest_framework.decorators import action
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
+from rest_framework.views import APIView
 
 from .models import Archivo, Equipo, EquipoUsuario, Proyecto, ProyectoEquipo
 from .serializers import (
@@ -20,43 +25,73 @@ class ProyectoViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        return Proyecto.objects.filter(equipos__usuarios=self.request.user).distinct()
+        return (
+            Proyecto.objects.filter(equipos__usuarios=self.request.user)
+            .distinct()
+            .prefetch_related("equipos")
+        )
 
+    @transaction.atomic
     def perform_create(self, serializer):
+        equipo_seleccionado = serializer.validated_data.pop("equipo", None)
         proyecto = serializer.save()
-        equipo = Equipo.objects.create(nombre=f'{proyecto.nombre} - Equipo principal')
+        equipo = Equipo.objects.create(
+            nombre=f"{proyecto.nombre} - Equipo principal"[:255]
+        )
         equipo.usuarios.add(self.request.user)
-        ProyectoEquipo.objects.create(proyecto=proyecto, equipo=equipo, objetivo='Equipo principal del proyecto')
+        ProyectoEquipo.objects.create(
+            proyecto=proyecto, equipo=equipo, objetivo="Equipo principal del proyecto"
+        )
+        if equipo_seleccionado is not None:
+            ProyectoEquipo.objects.create(proyecto=proyecto, equipo=equipo_seleccionado)
+        serializer.context.pop("equipos_del_usuario", None)
 
-    @action(detail=True, methods=['get', 'post'], url_path='equipos')
+    @action(detail=True, methods=["get", "post"], url_path="equipos")
     def equipos(self, request, pk=None):
         proyecto = self.get_object()
 
-        if request.method == 'GET':
-            equipos = proyecto.equipos.all().distinct()
-            return Response(EquipoSerializer(equipos, many=True).data)
+        if request.method == "GET":
+            equipos = proyecto.equipos.all().distinct().prefetch_related("usuarios")
+            return Response(
+                EquipoSerializer(
+                    equipos, many=True, context=self.get_serializer_context()
+                ).data
+            )
 
         if not proyecto.equipos.filter(usuarios=request.user).exists():
-            return Response({'detail': 'No tienes permiso para asociar equipos a este proyecto.'}, status=403)
+            return Response(
+                {"detail": "No tienes permiso para asociar equipos a este proyecto."},
+                status=403,
+            )
 
-        serializer = ProyectoEquipoSerializer(data=request.data, context={'proyecto': proyecto})
+        serializer = ProyectoEquipoSerializer(
+            data=request.data, context={"proyecto": proyecto}
+        )
         serializer.is_valid(raise_exception=True)
         relacion = serializer.save()
-        return Response({
-            'equipo': relacion.equipo.id,
-            'objetivo': relacion.objetivo,
-            'descripcion': relacion.descripcion,
-            'proyecto': proyecto.id,
-        }, status=201)
+        return Response(
+            {
+                "equipo": relacion.equipo.id,
+                "objetivo": relacion.objetivo,
+                "descripcion": relacion.descripcion,
+                "proyecto": proyecto.id,
+            },
+            status=201,
+        )
 
-    @action(detail=True, methods=['delete'], url_path='equipos/(?P<equipo_pk>[^/.]+)')
+    @action(detail=True, methods=["delete"], url_path="equipos/(?P<equipo_pk>[^/.]+)")
     def eliminar_equipo(self, request, pk=None, equipo_pk=None):
         proyecto = self.get_object()
 
         if not proyecto.equipos.filter(usuarios=request.user).exists():
-            return Response({'detail': 'No tienes permiso para quitar equipos de este proyecto.'}, status=403)
+            return Response(
+                {"detail": "No tienes permiso para quitar equipos de este proyecto."},
+                status=403,
+            )
 
-        proyecto.equipos.through.objects.filter(proyecto_id=proyecto.id, equipo_id=equipo_pk).delete()
+        proyecto.equipos.through.objects.filter(
+            proyecto_id=proyecto.id, equipo_id=equipo_pk
+        ).delete()
         return Response(status=204)
 
 
@@ -65,61 +100,94 @@ class EquipoViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        return Equipo.objects.filter(usuarios=self.request.user).distinct()
+        return (
+            Equipo.objects.filter(usuarios=self.request.user)
+            .distinct()
+            .prefetch_related("usuarios")
+        )
 
+    @transaction.atomic
     def perform_create(self, serializer):
         equipo = serializer.save()
-        EquipoUsuario.objects.create(usuario=self.request.user, equipo=equipo, rol='owner')
+        EquipoUsuario.objects.create(
+            usuario=self.request.user, equipo=equipo, rol="owner"
+        )
 
-    @action(detail=True, methods=['get'], url_path='proyectos')
+    @action(detail=True, methods=["get"], url_path="proyectos")
     def proyectos(self, request, pk=None):
         equipo = self.get_object()
         if not equipo.usuarios.filter(id=request.user.id).exists():
-            return Response({'detail': 'No tienes permiso para ver los proyectos de este equipo.'}, status=403)
+            return Response(
+                {"detail": "No tienes permiso para ver los proyectos de este equipo."},
+                status=403,
+            )
 
-        proyectos = equipo.proyectos.all().distinct()
-        return Response(ProyectoSerializer(proyectos, many=True).data)
+        proyectos = equipo.proyectos.all().distinct().prefetch_related("equipos")
+        return Response(
+            ProyectoSerializer(
+                proyectos, many=True, context=self.get_serializer_context()
+            ).data
+        )
 
-    @action(detail=True, methods=['get', 'post'], url_path='miembros')
+    @action(detail=True, methods=["get", "post"], url_path="miembros")
     def miembros(self, request, pk=None):
         equipo = Equipo.objects.filter(pk=pk).first()
         if equipo is None:
-            return Response({'detail': 'Equipo no encontrado.'}, status=404)
+            return Response({"detail": "Equipo no encontrado."}, status=404)
 
         if not equipo.usuarios.filter(id=request.user.id).exists():
-            return Response({'detail': 'No tienes permiso para gestionar miembros de este equipo.'}, status=403)
+            return Response(
+                {"detail": "No tienes permiso para gestionar miembros de este equipo."},
+                status=403,
+            )
 
-        if request.method == 'GET':
+        if request.method == "GET":
             members = []
-            for relacion in EquipoUsuario.objects.filter(equipo=equipo).select_related('usuario'):
-                members.append({
-                    'usuario': relacion.usuario.id,
-                    'username': relacion.usuario.username,
-                    'rol': relacion.rol,
-                })
+            for relacion in EquipoUsuario.objects.filter(equipo=equipo).select_related(
+                "usuario"
+            ):
+                members.append(
+                    {
+                        "usuario": relacion.usuario.id,
+                        "username": relacion.usuario.username,
+                        "rol": relacion.rol,
+                    }
+                )
             return Response(members)
 
-        serializer = EquipoUsuarioSerializer(data=request.data, context={'equipo': equipo})
+        serializer = EquipoUsuarioSerializer(
+            data=request.data, context={"equipo": equipo}
+        )
         serializer.is_valid(raise_exception=True)
         instancia = serializer.save()
-        return Response({
-            'usuario': instancia.usuario.id,
-            'rol': instancia.rol,
-            'equipo': equipo.id,
-        }, status=201)
+        return Response(
+            {
+                "usuario": instancia.usuario.id,
+                "rol": instancia.rol,
+                "equipo": equipo.id,
+            },
+            status=201,
+        )
 
-    @action(detail=True, methods=['delete'], url_path='miembros/(?P<usuario_pk>[^/.]+)')
+    @action(detail=True, methods=["delete"], url_path="miembros/(?P<usuario_pk>[^/.]+)")
     def eliminar_miembro(self, request, pk=None, usuario_pk=None):
         equipo = Equipo.objects.filter(pk=pk).first()
         if equipo is None:
-            return Response({'detail': 'Equipo no encontrado.'}, status=404)
+            return Response({"detail": "Equipo no encontrado."}, status=404)
 
         if not equipo.usuarios.filter(id=request.user.id).exists():
-            return Response({'detail': 'No tienes permiso para gestionar miembros de este equipo.'}, status=403)
+            return Response(
+                {"detail": "No tienes permiso para gestionar miembros de este equipo."},
+                status=403,
+            )
 
-        relacion = EquipoUsuario.objects.filter(equipo=equipo, usuario_id=usuario_pk).first()
+        relacion = EquipoUsuario.objects.filter(
+            equipo=equipo, usuario_id=usuario_pk
+        ).first()
         if relacion is None:
-            return Response({'detail': 'Ese usuario no pertenece a este equipo.'}, status=404)
+            return Response(
+                {"detail": "Ese usuario no pertenece a este equipo."}, status=404
+            )
 
         relacion.delete()
         return Response(status=204)
@@ -144,6 +212,34 @@ class ArchivoViewSet(viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         serializer.save(usuario=self.request.user)
+
+    @action(detail=True, methods=["get"])
+    def download(self, request, pk=None):
+        archivo = self.get_object()
+        if not archivo.archivo:
+            raise Http404("Archivo no encontrado.")
+        try:
+            contenido = archivo.archivo.open("rb")
+        except FileNotFoundError:
+            raise Http404("Archivo no encontrado.")
+        nombre = PurePosixPath(archivo.nombre_original.replace("\\", "/")).name
+        nombre = "".join(caracter for caracter in nombre if caracter.isprintable())
+        if nombre in ("", ".", ".."):
+            nombre = "archivo"
+        return FileResponse(contenido, as_attachment=True, filename=nombre)
+
+
+class MeView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        return Response(
+            {
+                "id": request.user.id,
+                "username": request.user.username,
+                "permissions": {"create_project": True, "create_group": True},
+            }
+        )
 
 
 class RegistroView(generics.CreateAPIView):

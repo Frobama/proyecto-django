@@ -1,4 +1,3 @@
-from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
@@ -93,6 +92,14 @@ class AutenticacionTests(APITestCase):
             format="json",
         )
         self.assertEqual(verify_response.status_code, status.HTTP_200_OK)
+
+    def test_schema_openapi_esta_disponible(self):
+        response = self.client.get(reverse("schema"), HTTP_ACCEPT="application/json")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn("/api/proyectos/", response.data["paths"])
+        self.assertIn("/api/equipos/", response.data["paths"])
+        self.assertIn("/api/archivos/", response.data["paths"])
 
 
 class ProyectosYEquiposTests(APITestCase):
@@ -273,11 +280,6 @@ class ProyectosYEquiposTests(APITestCase):
 
 class ProteccionArchivoTests(APITestCase):
     def setUp(self):
-        media = TemporaryDirectory()
-        self.addCleanup(media.cleanup)
-        settings = override_settings(MEDIA_ROOT=media.name)
-        settings.enable()
-        self.addCleanup(settings.disable)
         self.client = APIClient()
         self.password = "ClaveSegura123!"
         self.usuario = Usuario.objects.create_user(
@@ -295,6 +297,11 @@ class ProteccionArchivoTests(APITestCase):
         self.otro_equipo = Equipo.objects.create(nombre="Otro equipo")
         ProyectoEquipo.objects.create(proyecto=self.proyecto, equipo=self.otro_equipo)
         EquipoUsuario.objects.create(usuario=self.otro_usuario, equipo=self.otro_equipo)
+
+    def tearDown(self):
+        for archivo in Archivo.objects.all():
+            archivo.archivo.delete(save=False)
+        super().tearDown()
 
     def _obtener_token(self, usuario):
         response = self.client.post(
@@ -399,11 +406,6 @@ class ProteccionArchivoTests(APITestCase):
 
 class IntegracionNexoTests(APITestCase):
     def setUp(self):
-        media = TemporaryDirectory()
-        self.addCleanup(media.cleanup)
-        settings = override_settings(MEDIA_ROOT=media.name)
-        settings.enable()
-        self.addCleanup(settings.disable)
         self.usuario = Usuario.objects.create_user(username="nombre_real")
         self.otro_usuario = Usuario.objects.create_user(username="otro_equipo")
         self.ajeno = Usuario.objects.create_user(username="fuera_del_proyecto")
@@ -423,6 +425,11 @@ class IntegracionNexoTests(APITestCase):
         )
         self.download_url = f"/api/archivos/{self.archivo.pk}/download/"
         self.client.force_authenticate(self.usuario)
+
+    def tearDown(self):
+        for archivo in Archivo.objects.all():
+            archivo.archivo.delete(save=False)
+        super().tearDown()
 
     def test_me_devuelve_identidad_y_capacidades(self):
         response = self.client.get("/api/me/")
@@ -625,7 +632,6 @@ class IntegracionNexoTests(APITestCase):
             self.assertEqual(
                 b"".join(response.streaming_content), b"contenido exacto\x00\xff"
             )
-            response.close()
         setattr(self.archivo, "global", True)
         self.archivo.save()
         self.client.force_authenticate(self.otro_usuario)
@@ -634,7 +640,6 @@ class IntegracionNexoTests(APITestCase):
         self.assertEqual(
             b"".join(response.streaming_content), b"contenido exacto\x00\xff"
         )
-        response.close()
         self.client.force_authenticate(self.ajeno)
         self.assertEqual(self.client.get(self.download_url).status_code, 404)
 
@@ -646,7 +651,6 @@ class IntegracionNexoTests(APITestCase):
         self.assertEqual(
             response["Content-Disposition"], 'attachment; filename="informe.txt"'
         )
-        response.close()
 
     def test_descarga_archivo_faltante_devuelve_404(self):
         self.archivo.archivo.storage.delete(self.archivo.archivo.name)
@@ -701,7 +705,6 @@ class IntegracionNexoTests(APITestCase):
         response = self.client.get(f"{url}download/")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(b"".join(response.streaming_content), b"segunda entrega")
-        response.close()
         self.assertEqual(self.client.delete(url).status_code, 204)
         self.assertEqual(self.client.get(url).status_code, 404)
 

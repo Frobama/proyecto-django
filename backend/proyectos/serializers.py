@@ -1,4 +1,5 @@
 from rest_framework import serializers
+from drf_spectacular.utils import extend_schema_field
 from .models import Archivo, Proyecto, Equipo, EquipoUsuario, ProyectoEquipo, Usuario
 from .permissions import usuario_tiene_acceso_al_archivo
 
@@ -53,7 +54,8 @@ class ProyectoSerializer(serializers.ModelSerializer):
             )
         return value
 
-    def get_permissions(self, obj):
+    @extend_schema_field(serializers.DictField(child=serializers.BooleanField()))
+    def get_permissions(self, obj) -> dict[str, bool]:
         permitido = any(
             equipo.pk in equipos_del_usuario(self.context)
             for equipo in obj.equipos.all()
@@ -71,7 +73,8 @@ class EquipoSerializer(serializers.ModelSerializer):
         model = Equipo
         fields = ["id", "nombre", "equipo_recurrente", "usuarios", "permissions"]
 
-    def get_permissions(self, obj):
+    @extend_schema_field(serializers.DictField(child=serializers.BooleanField()))
+    def get_permissions(self, obj) -> dict[str, bool]:
         return dict.fromkeys(
             ["edit", "delete", "manage_members"],
             obj.pk in equipos_del_usuario(self.context),
@@ -135,7 +138,8 @@ class ArchivoSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = ["usuario", "fecha_subido"]
 
-    def get_permissions(self, obj):
+    @extend_schema_field(serializers.DictField(child=serializers.BooleanField()))
+    def get_permissions(self, obj) -> dict[str, bool]:
         request = self.context.get("request")
         permitido = usuario_tiene_acceso_al_archivo(
             request.user if request else None, obj

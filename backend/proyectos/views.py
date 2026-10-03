@@ -2,7 +2,9 @@ from pathlib import PurePosixPath
 
 from django.db import transaction
 from django.http import FileResponse, Http404
+from drf_spectacular.utils import extend_schema, inline_serializer
 from rest_framework import generics, viewsets
+from rest_framework import serializers
 from rest_framework.decorators import action
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
@@ -23,6 +25,7 @@ from .permissions import EsMiembroDelEquipo, usuario_tiene_acceso_al_archivo
 class ProyectoViewSet(viewsets.ModelViewSet):
     serializer_class = ProyectoSerializer
     permission_classes = [IsAuthenticated]
+    lookup_value_regex = r"\d+"
 
     def get_queryset(self):
         return (
@@ -79,7 +82,7 @@ class ProyectoViewSet(viewsets.ModelViewSet):
             status=201,
         )
 
-    @action(detail=True, methods=["delete"], url_path="equipos/(?P<equipo_pk>[^/.]+)")
+    @action(detail=True, methods=["delete"], url_path=r"equipos/(?P<equipo_pk>\d+)")
     def eliminar_equipo(self, request, pk=None, equipo_pk=None):
         proyecto = self.get_object()
 
@@ -98,6 +101,7 @@ class ProyectoViewSet(viewsets.ModelViewSet):
 class EquipoViewSet(viewsets.ModelViewSet):
     serializer_class = EquipoSerializer
     permission_classes = [IsAuthenticated]
+    lookup_value_regex = r"\d+"
 
     def get_queryset(self):
         return (
@@ -169,7 +173,7 @@ class EquipoViewSet(viewsets.ModelViewSet):
             status=201,
         )
 
-    @action(detail=True, methods=["delete"], url_path="miembros/(?P<usuario_pk>[^/.]+)")
+    @action(detail=True, methods=["delete"], url_path=r"miembros/(?P<usuario_pk>\d+)")
     def eliminar_miembro(self, request, pk=None, usuario_pk=None):
         equipo = Equipo.objects.filter(pk=pk).first()
         if equipo is None:
@@ -196,6 +200,7 @@ class EquipoViewSet(viewsets.ModelViewSet):
 class ArchivoViewSet(viewsets.ModelViewSet):
     serializer_class = ArchivoSerializer
     permission_classes = [IsAuthenticated, EsMiembroDelEquipo]
+    lookup_value_regex = r"\d+"
 
     def get_queryset(self):
         queryset = Archivo.objects.filter(
@@ -232,6 +237,22 @@ class ArchivoViewSet(viewsets.ModelViewSet):
 class MeView(APIView):
     permission_classes = [IsAuthenticated]
 
+    @extend_schema(
+        responses=inline_serializer(
+            name="MeResponse",
+            fields={
+                "id": serializers.IntegerField(),
+                "username": serializers.CharField(),
+                "permissions": inline_serializer(
+                    name="MePermissions",
+                    fields={
+                        "create_project": serializers.BooleanField(),
+                        "create_group": serializers.BooleanField(),
+                    },
+                ),
+            },
+        )
+    )
     def get(self, request):
         return Response(
             {

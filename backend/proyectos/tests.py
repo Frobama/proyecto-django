@@ -153,7 +153,7 @@ class ProyectosYEquiposTests(APITestCase):
 
         miembro = self.client.post(
             f"/api/equipos/{equipo_id}/miembros/",
-            {"usuario": self.otro_usuario.id, "rol": "analista"},
+            {"usuario": self.otro_usuario.id, "rol": "editor"},
             format="json",
         )
         self.assertEqual(miembro.status_code, status.HTTP_201_CREATED)
@@ -196,7 +196,7 @@ class ProyectosYEquiposTests(APITestCase):
             "/api/proyectos/", {"nombre": "Proyecto B"}, format="json"
         )
         equipo = self.client.post(
-            "/api/equipos/", {"nombre": "Equipo compartido"}, format="json"
+            "/api/equipos/", {"nombre": "Equipo compartido", "equipo_recurrente": True}, format="json"
         )
         self.assertEqual(proyecto_1.status_code, status.HTTP_201_CREATED)
         self.assertEqual(proyecto_2.status_code, status.HTTP_201_CREATED)
@@ -258,7 +258,7 @@ class ProyectosYEquiposTests(APITestCase):
 
         miembro = self.client.post(
             f"/api/equipos/{equipo.data['id']}/miembros/",
-            {"usuario": self.otro_usuario.id, "rol": "analista"},
+            {"usuario": self.otro_usuario.id, "rol": "editor"},
             format="json",
         )
         self.assertEqual(miembro.status_code, status.HTTP_201_CREATED)
@@ -287,9 +287,9 @@ class ProteccionArchivoTests(APITestCase):
             password=self.password,
         )
         self.equipo = Equipo.objects.create(nombre="Equipo de prueba")
-        EquipoUsuario.objects.create(usuario=self.usuario, equipo=self.equipo)
+        EquipoUsuario.objects.create(usuario=self.usuario, equipo=self.equipo, rol="admin")
         self.proyecto = Proyecto.objects.create(nombre="Proyecto de prueba")
-        ProyectoEquipo.objects.create(proyecto=self.proyecto, equipo=self.equipo)
+        ProyectoEquipo.objects.create(proyecto=self.proyecto, equipo=self.equipo, rol="admin")
         self.otro_usuario = Usuario.objects.create_user(
             username="otro_miembro",
             password=self.password,
@@ -333,7 +333,7 @@ class ProteccionArchivoTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
 
     def test_archivo_privado_solo_es_visible_para_su_equipo(self):
-        Archivo.objects.create(
+        archivo = Archivo.objects.create(
             nombre_original="informe.txt",
             archivo=SimpleUploadedFile("informe.txt", b"contenido confidencial"),
             categoria="documento",
@@ -341,6 +341,7 @@ class ProteccionArchivoTests(APITestCase):
             proyecto=self.proyecto,
             **{"global": False},
         )
+        archivo.equipos_visibles.add(self.equipo)
 
         self.client.credentials(
             HTTP_AUTHORIZATION=f"Bearer {self._obtener_token(self.usuario)}"
@@ -411,18 +412,19 @@ class IntegracionNexoTests(APITestCase):
         self.ajeno = Usuario.objects.create_user(username="fuera_del_proyecto")
         self.equipo = Equipo.objects.create(nombre="Equipo propio")
         EquipoUsuario.objects.create(
-            usuario=self.usuario, equipo=self.equipo, rol="analista"
+            usuario=self.usuario, equipo=self.equipo, rol="admin"
         )
         self.otro_equipo = Equipo.objects.create(nombre="Equipo asociado")
-        EquipoUsuario.objects.create(usuario=self.otro_usuario, equipo=self.otro_equipo)
+        EquipoUsuario.objects.create(usuario=self.otro_usuario, equipo=self.otro_equipo, rol="admin")
         self.proyecto = Proyecto.objects.create(nombre="Proyecto compartido")
-        self.proyecto.equipos.add(self.equipo, self.otro_equipo)
+        self.proyecto.equipos.add(self.equipo, self.otro_equipo, through_defaults={"rol": "admin"})
         self.archivo = Archivo.objects.create(
             nombre_original="informe.txt",
             archivo=SimpleUploadedFile("informe.txt", b"contenido exacto\x00\xff"),
             usuario=self.usuario,
             proyecto=self.proyecto,
         )
+        self.archivo.equipos_visibles.add(self.equipo)
         self.download_url = f"/api/archivos/{self.archivo.pk}/download/"
         self.client.force_authenticate(self.usuario)
 
@@ -440,12 +442,13 @@ class IntegracionNexoTests(APITestCase):
                 "id": self.usuario.pk,
                 "username": "nombre_real",
                 "permissions": {"create_project": True, "create_group": True},
+                "limits": {"max_file_size": 20971520},
             },
         )
         self.client.force_authenticate(None)
         self.assertEqual(self.client.get("/api/me/").status_code, 401)
 
-    def test_capacidades_reflejan_membresia_sin_jerarquia_de_roles(self):
+    def test_capacidades_reflejan_roles_contextuales(self):
         response = self.client.get(f"/api/proyectos/{self.proyecto.pk}/")
         self.assertCountEqual(
             response.data["equipos"], [self.equipo.pk, self.otro_equipo.pk]
@@ -484,7 +487,10 @@ class IntegracionNexoTests(APITestCase):
         ):
             self.assertFalse(any(serializer(instance).data["permissions"].values()))
 
-    def test_creacion_con_equipo_conserva_equipo_principal(self):
+    def test_creacion_con_equipo_reutiliza_equipo_principal(self):
+        self.equipo.equipo_recurrente = True
+        self.equipo.save()
+        before = (Equipo.objects.count(), EquipoUsuario.objects.count())
         response = self.client.post(
             "/api/proyectos/",
             {"nombre": "Nuevo", "equipo": self.equipo.pk},
@@ -493,13 +499,10 @@ class IntegracionNexoTests(APITestCase):
         self.assertEqual(response.status_code, 201)
         self.assertNotIn("equipo", response.data)
         project = Proyecto.objects.get(pk=response.data["id"])
-        principal = project.equipos.exclude(pk=self.equipo.pk).get()
-        self.assertEqual(principal.nombre, "Nuevo - Equipo principal")
-        self.assertTrue(principal.usuarios.filter(pk=self.usuario.pk).exists())
-        self.assertIsNone(
-            EquipoUsuario.objects.get(equipo=principal, usuario=self.usuario).rol
-        )
-        self.assertCountEqual(response.data["equipos"], [self.equipo.pk, principal.pk])
+        self.assertEqual(project.equipos.get(), self.equipo)
+        self.assertEqual(ProyectoEquipo.objects.get(proyecto=project, equipo=self.equipo).rol, "admin")
+        self.assertEqual(before, (Equipo.objects.count(), EquipoUsuario.objects.count()))
+        self.assertEqual(response.data["equipos"], [self.equipo.pk])
         self.assertTrue(all(response.data["permissions"].values()))
 
     def test_creacion_sin_equipo_y_creacion_de_grupo(self):
@@ -519,7 +522,7 @@ class IntegracionNexoTests(APITestCase):
             EquipoUsuario.objects.get(
                 equipo_id=response.data["id"], usuario=self.usuario
             ).rol,
-            "owner",
+            "admin",
         )
 
     def test_creacion_rechaza_equipo_ajeno_o_invalido_sin_escrituras(self):
@@ -555,7 +558,7 @@ class IntegracionNexoTests(APITestCase):
         self.assertEqual(response.status_code, 400)
         self.assertEqual(self.proyecto.equipos.count(), 2)
 
-    def test_creacion_de_proyecto_revierte_si_falla_asociacion_principal_o_opcional(
+    def test_creacion_de_proyecto_revierte_si_falla_asociacion_principal(
         self,
     ):
         before = (
@@ -564,25 +567,18 @@ class IntegracionNexoTests(APITestCase):
             EquipoUsuario.objects.count(),
             ProyectoEquipo.objects.count(),
         )
-        create = ProyectoEquipo.objects.create
-        for failure_at in (1, 2):
-            calls = []
-
-            def crear_relacion(**kwargs):
-                calls.append(kwargs)
-                if len(calls) == failure_at:
-                    raise RuntimeError("Fallo simulado")
-                return create(**kwargs)
-
-            with self.subTest(failure_at=failure_at):
+        self.equipo.equipo_recurrente = True
+        self.equipo.save()
+        for selected in (False, True):
+            with self.subTest(selected=selected):
                 with patch(
-                    "proyectos.views.ProyectoEquipo.objects.create",
-                    side_effect=crear_relacion,
+                    "proyectos.services.ProyectoEquipo.objects.create",
+                    side_effect=RuntimeError("Fallo simulado"),
                 ):
                     with self.assertRaisesMessage(RuntimeError, "Fallo simulado"):
                         self.client.post(
                             "/api/proyectos/",
-                            {"nombre": "Rollback", "equipo": self.equipo.pk},
+                            {"nombre": "Rollback", **({'equipo': self.equipo.pk} if selected else {})},
                             format="json",
                         )
                 self.assertEqual(
@@ -598,7 +594,7 @@ class IntegracionNexoTests(APITestCase):
     def test_creacion_de_grupo_revierte_si_falla_membresia(self):
         before = (Equipo.objects.count(), EquipoUsuario.objects.count())
         with patch(
-            "proyectos.views.EquipoUsuario.objects.create",
+            "proyectos.services.EquipoUsuario.objects.create",
             side_effect=RuntimeError("Fallo simulado"),
         ):
             with self.assertRaisesMessage(RuntimeError, "Fallo simulado"):

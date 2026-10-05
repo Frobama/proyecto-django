@@ -34,6 +34,7 @@ jobs:
       DB_PASSWORD: postgres
       DB_HOST: localhost
       DB_PORT: 5432
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/proyectos
     steps:
       - name: Descargar código
         uses: actions/checkout@v4
